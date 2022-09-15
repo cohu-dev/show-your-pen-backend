@@ -1,0 +1,228 @@
+service: show-your-pen
+frameworkVersion: "3"
+useDotenv: true
+package:
+  individually: false
+  patterns: # directory -> file
+    - "functions/**"
+    - "!.vscode/**"
+    - "!data/**"
+    - "!tmp/**"
+    - "!venv/**"
+    - "!node_modules/**"
+    - "!resources/**"
+    - "!config/**"
+    - "!.env"
+    - "!package.json"
+    - "!package-lock.json"
+    - "!memo.txt"
+    - "!README.md"
+    - "!requirements.txt"
+
+custom:
+  profiles:
+    dev: serverless-admin
+    prd: serverless-admin
+  tableName: "pen-table-${sls:stage}"
+  bucketName: "pen-bucket-${sls:stage}"
+  frontUrl: "https://pen.cohu.dev"
+  # pythonRequirements:
+  #   dockerizePip: true
+  #   slim: true
+  #   zip: true
+
+  # for local
+  s3:
+    host: localhost
+    port: 4569
+    directory: /tmp
+    cors: config/s3_cors_rule.xml
+  # for local
+  dynamodb:
+    stages:
+      - ${opt:stage, 'dev'}
+    start:
+      port: 8000
+      inMemory: true
+      heapInitial: 200m
+      heapMax: 1g
+      migrate: true
+      seed: false
+      convertEmptyValues: true
+
+provider:
+  name: aws
+  runtime: python3.8
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-northeast-1'}
+  profile: serverless-admin
+  memorySize: 512 # 1024 is default
+  logs:
+    httpApi: true
+  httpApi:
+    cors:
+      allowedOrigins:
+        - https://pen.cohu.dev
+        - http://localhost:3001
+      allowedHeaders:
+        - Content-Type
+        # - X-Api-Key
+      allowedMethods:
+        - "*"
+      allowCredentials: true
+      exposedResponseHeaders:
+        - Special-Response-Header
+      maxAge: 6000 # In seconds
+  apiGateway:
+    apiKeys:
+      - name: banKey
+      - value: ${file(./config/keys.yaml):X_API_KEY}
+
+layers:
+  original:
+    path: layers
+    name: ${self:service}-layer
+    compatibleRuntimes:
+      - python3.8
+
+functions:
+  upload:
+    name: image_upload_${opt:stage, 'dev'}
+    handler: functions/upload.handler
+    events:
+      - httpApi:
+          method: POST
+          path: /pen
+    layers:
+      - { Ref: OriginalLambdaLayer }
+    environment:
+      STAGE: ${opt:stage, 'dev'}
+      CK: ${env:CK}
+      CS: ${env:CS}
+      AK: ${env:AK}
+      AS: ${env:AS}
+    iamRoleStatements:
+      - Effect: "Allow"
+        Action:
+          - s3:GetObject
+          - s3:PutObject
+        Resource: "*"
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+        Resource:
+          - "*"
+      - Effect: Allow
+        Action:
+          - rekognition:* # TODO: only delect label
+        Resource: "*"
+  report:
+    name: report_${opt:stage, 'dev'}
+    handler: functions/report.handler
+    events:
+      - httpApi:
+          method: POST
+          path: /report/{id}
+    layers:
+      - { Ref: OriginalLambdaLayer }
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - s3:GetObject
+          - s3:PutObject
+        Resource: "*"
+    environment:
+      STAGE: ${opt:stage, 'dev'}
+      X_API_KEY: ${file(./config/keys.yaml):X_API_KEY}
+      S3_PRD_URL: ${file(./config/keys.yaml):S3_PRD_URL}
+      DELETE_URL: ${file(./config/keys.yaml):DELETE_URL}
+      WEBHOOK_REPORT_URL: ${file(./config/keys.yaml):WEBHOOK_REPORT_URL}
+  latest:
+    name: latest_pen_${opt:stage, 'dev'}
+    handler: functions/latest.handler
+    events:
+      - httpApi:
+          method: GET
+          path: /pen
+    environment:
+      STAGE: ${opt:stage, 'dev'}
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - s3:GetObject
+        Resource: "*"
+    layers:
+      - { Ref: OriginalLambdaLayer }
+  randomTweet: # TODO
+    name: random_tweet_${opt:stage, 'dev'}
+    handler: functions/random_tweet.handler
+    # cron
+    environment:
+      # tokens...
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+          - dynamodb:Scan
+        Resource: "*"
+    layers:
+      - { Ref: OriginalLambdaLayer }
+  random: # TODO
+    name: random_pen_${opt:stage, 'dev'}
+    handler: functions/random.handler
+    events:
+      - httpApi:
+          method: GET
+          path: /random
+    environment:
+      STAGE: ${opt:stage, 'dev'}
+    iamRoleStatements:
+      - Effect: "Allow"
+        Action:
+          - dynamodb:Query
+          - dynamodb:Scan
+        Resource: "*"
+    layers:
+      - { Ref: OriginalLambdaLayer }
+  ban:
+    name: ban_pen_${opt:stage, 'dev'}
+    handler: functions/ban.handler
+    events:
+      - http:
+          method: DELETE
+          path: /pen/{id}
+          private: true
+          cors:
+            origin: "*"
+            headers:
+              - Content-Type
+              - X-Api-Key
+            allowCredentials: true
+    environment:
+      STAGE: ${opt:stage, 'dev'}
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - s3:GetObject
+          - s3:PutObject
+        Resource: "*"
+      - Effect: Allow
+        Action:
+          - dynamodb:DeleteItem
+        Resource: "*"
+    layers:
+      - { Ref: OriginalLambdaLayer }
+
+plugins:
+  - serverless-dynamodb-local
+  - serverless-s3-local
+  - serverless-offline
+  # - serverless-python-requirements
+  - serverless-iam-roles-per-function
+
+resources:
+  # S3
+  - ${file(resources/s3-bucket.yaml)}
+  # DynamoDB Table
+  - ${file(resources/dynamo-table.yaml)}
+  # Cognito
